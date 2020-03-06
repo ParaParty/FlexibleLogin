@@ -131,6 +131,9 @@ public abstract class Database {
 
     public Optional<Account> loadAccount(User player) {
         Optional<Account> optAcc = loadAccount(player.getUniqueId());
+        if (!optAcc.isPresent()) {
+            optAcc = loadAccount(player.getName());
+        }
         optAcc.ifPresent(account -> cache.put(player.getUniqueId(), account));
         return optAcc;
     }

@@ -35,6 +35,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
+import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
@@ -129,7 +130,7 @@ public class FlexibleDatabase extends Database {
         try (Connection conn = dataSource.getConnection();
              PreparedStatement stmt = conn.prepareStatement("INSERT INTO " + tableName
                      + " (Username, Password, IP, LastLogin, Email, LoggedIn, UUID) VALUES (?,?,?,?,?,?,?)")) {
-            writeAccount(stmt, account);
+            writeAccount(stmt, account, 0);
             stmt.executeUpdate();
             return true;
         } catch (SQLException sqlEx) {
@@ -140,13 +141,26 @@ public class FlexibleDatabase extends Database {
 
     @Override
     public boolean save(Account account) {
-        try (Connection con = dataSource.getConnection();
-             PreparedStatement stmt = con.prepareStatement("UPDATE " + tableName
-                + " SET Username=?, Password=?, IP=?, LastLogin=?, Email=?, LoggedIn=? WHERE UUID=?")) {
-            writeAccount(stmt, account);
-            stmt.executeUpdate();
-            return true;
-        } catch (SQLException ex) {
+        try {
+            Optional<Account> optAcc = loadAccount(account.getId());
+            if (optAcc.isPresent()) {
+                Connection con = dataSource.getConnection();
+                PreparedStatement stmt = con.prepareStatement("UPDATE " + tableName
+                        + " SET Username=?, Password=?, IP=?, LastLogin=?, Email=?, LoggedIn=? WHERE UUID=?");
+
+                writeAccount(stmt, account, 0);
+                stmt.executeUpdate();
+                return true;
+            } else {
+                Connection con = dataSource.getConnection();
+                PreparedStatement stmt = con.prepareStatement("UPDATE " + tableName
+                        + " SET UUID=?, Password=?, IP=?, LastLogin=?, Email=?, LoggedIn=? WHERE Username=?");
+
+                writeAccount(stmt, account, 1);
+                stmt.executeUpdate();
+                return true;
+            }
+        } catch (SQLException | IllegalArgumentException ex) {
             logger.error("Error saving user account", ex);
             return false;
         }
@@ -159,8 +173,21 @@ public class FlexibleDatabase extends Database {
                 .array();
     }
 
-    private void writeAccount(PreparedStatement stmt, Account account) throws SQLException {
-        stmt.setString(1, account.getUsername().orElse(""));
+    private void writeAccount(PreparedStatement stmt, Account account, int mode) throws SQLException {
+        if (mode == 0) {
+            stmt.setString(1, account.getUsername().orElse(""));
+            stmt.setObject(7, toArray(account.getId()));
+        } else if (mode == 1) {
+            String username = account.getUsername().orElse(null);
+            if (username == null) {
+                throw new IllegalArgumentException();
+            }
+            stmt.setString(7, username);
+            stmt.setObject(1, toArray(account.getId()));
+        } else {
+            throw new IllegalArgumentException();
+        }
+
         stmt.setString(2, account.getPassword());
         stmt.setObject(3, account.getIP().map(InetAddress::getAddress).orElse(new byte[0]));
 
@@ -168,7 +195,6 @@ public class FlexibleDatabase extends Database {
         stmt.setString(5, account.getMail().orElse(null));
         stmt.setBoolean(6, account.isLoggedIn());
 
-        stmt.setObject(7, toArray(account.getId()));
     }
 
     @Override
@@ -184,6 +210,10 @@ public class FlexibleDatabase extends Database {
         InetAddress ip = parseAddress(resultSet.getBytes(5));
         Instant lastLogin = parseTimestamp(resultSet, 6);
         String mail = resultSet.getString(7);
+
+        if (uuid == null) {
+            uuid = Account.getOfflineUUID(username);
+        }
 
         return Optional.of(new Account(uuid, username, password, ip, mail, lastLogin));
     }
@@ -201,8 +231,13 @@ public class FlexibleDatabase extends Database {
     }
 
     private UUID parseUUID(byte[] bytes) {
+        if  (bytes == null) return null;
         ByteBuffer uuidBytes = ByteBuffer.wrap(bytes);
-        return new UUID(uuidBytes.getLong(), uuidBytes.getLong());
+        try {
+            return new UUID(uuidBytes.getLong(), uuidBytes.getLong());
+        } catch (BufferUnderflowException e){
+            return null;
+        }
     }
 
     @Override
